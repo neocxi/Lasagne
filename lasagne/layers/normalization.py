@@ -116,20 +116,23 @@ class BatchNormLayer(Layer):
     lasagne.layers.BatchNormLayer(incoming, axes=None, epsilon=1e-4, alpha=0.5,
     nonlinearity=None, mode='low_mem', beta=lasagne.init.Constant(0),
     gamma=lasagne.init.Constant(1), mean=lasagne.init.Constant(0),
-    std=lasagne.init.Constant(1), **kwargs)
+    var=lasagne.init.Constant(1), **kwargs)
 
     Batch Normalization
 
-    This layer implements batch normalization of its inputs, following [1]_.
-    The basic operation is :math:`y = (x - \\mu) / \\sigma * \\gamma + \\beta`,
-    i.e., the input is normalized to zero mean and unit variance, and then
+    This layer implements batch normalization of its inputs, following [1]_:
+
+    ..math ::
+        y = (x - \\mu) / \\sqrt{\\sigma^2 + \\epsilon} * \\gamma + \\beta
+
+    That is, the input is normalized to zero mean and unit variance, and then
     linearly transformed.
 
-    During training, :math:`\\mu` and :math:`\\sigma` are defined to be the
-    mean and standard deviation of the current input mini-batch :math:`x`, and
-    during testing, they are replaced with average statistics over the training
-    data. Consequently, this layer has four stored parameters: :math:`beta`,
-    :math:`gamma`, and the average statistics :math:`\\mu` and :math:`\\sigma`.
+    During training, :math:`\\mu` and :math:`\\sigma^2` are defined to be the
+    mean and variance of the current input mini-batch :math:`x`, and during
+    testing, they are replaced with average statistics over the training
+    data. Consequently, this layer has four stored parameters: :math:`\\beta`,
+    :math:`\\gamma`, and the averages :math:`\\mu` and :math:`\\sigma^2`.
     By default, this layer learns the average statistics as exponential moving
     averages computed during training, so it can be plugged into an existing
     network without any changes of the training procedure (see Notes).
@@ -144,8 +147,8 @@ class BatchNormLayer(Layer):
         the minibatch dimension for dense layers, and additionally over all
         spatial dimensions for convolutional layers.
     epsilon : scalar
-        Small constant added to the variance before taking the square root and
-        dividing by it, to avoid numeric problems
+        Small constant :math:`\\epsilon` added to the variance before taking
+        the square root and dividing by it, to avoid numeric problems
     alpha : scalar
         Coefficient for the exponential moving average of batch-wise means and
         standard deviations computed during training; the closer to one, the
@@ -170,8 +173,8 @@ class BatchNormLayer(Layer):
         Initial value, expression or initializer for :math:`\\mu`. Must match
         the incoming shape, skipping all axes in `axes`.
         See :func:`lasagne.utils.create_param` for more information.
-    std : Theano shared variable, expression, numpy array, or callable
-        Initial value, expression or initializer for :math:`\\sigma`. Must
+    var : Theano shared variable, expression, numpy array, or callable
+        Initial value, expression or initializer for :math:`\\sigma^2`. Must
         match the incoming shape, skipping all axes in `axes`.
         See :func:`lasagne.utils.create_param` for more information.
     **kwargs
@@ -217,9 +220,9 @@ class BatchNormLayer(Layer):
             Internal Covariate Shift. http://arxiv.org/abs/1502.03167.
     """
     def __init__(self, incoming, axes=None, epsilon=1e-4, alpha=0.5,
-            nonlinearity=None, mode='low_mem',
-            beta=init.Constant(0), gamma=init.Constant(1),
-            mean=init.Constant(0), std=init.Constant(1), **kwargs):
+                 nonlinearity=None, mode='low_mem',
+                 beta=init.Constant(0), gamma=init.Constant(1),
+                 mean=init.Constant(0), var=init.Constant(1), **kwargs):
         super(BatchNormLayer, self).__init__(incoming, **kwargs)
 
         if axes == 'auto':
@@ -248,22 +251,22 @@ class BatchNormLayer(Layer):
                                     trainable=True, regularizable=False)
         self.mean = self.add_param(mean, shape, 'mean',
                                    trainable=False, regularizable=False)
-        self.std = self.add_param(std, shape, 'std',
+        self.var = self.add_param(var, shape, 'var',
                                   trainable=False, regularizable=False)
 
     def get_output_for(self, input, deterministic=False, **kwargs):
         input_mean = input.mean(self.axes)
-        input_std = T.sqrt(input.var(self.axes) + self.epsilon)
+        input_var = input.var(self.axes)
 
         # Decide whether to use the stored averages or mini-batch statistics
         use_averages = kwargs.get('batch_norm_use_averages',
                                   deterministic)
         if use_averages:
             mean = self.mean
-            std = self.std
+            var = self.var
         else:
             mean = input_mean
-            std = input_std
+            var = input_var
 
         # Decide whether to update the stored averages
         update_averages = kwargs.get('batch_norm_update_averages',
@@ -272,29 +275,30 @@ class BatchNormLayer(Layer):
             # Trick: To update the stored statistics, we create memory-aliased
             # clones of the stored statistics:
             running_mean = theano.clone(self.mean, share_inputs=False)
-            running_std = theano.clone(self.std, share_inputs=False)
+            running_var = theano.clone(self.var, share_inputs=False)
             # set a default update for them:
             running_mean.default_update = ((1 - self.alpha) * running_mean +
                                            self.alpha * input_mean)
-            running_std.default_update = ((1 - self.alpha) * running_std +
-                                          self.alpha * input_std)
+            running_var.default_update = ((1 - self.alpha) * running_var +
+                                          self.alpha * input_var)
             # and make sure they end up in the graph without participating in
             # the computation (this way their default_update will be collected
             # and applied, but the computation will be optimized away):
             mean += 0 * running_mean
-            std += 0 * running_std
+            var += 0 * running_var
 
         # prepare dimshuffle pattern inserting broadcastable axes as needed
-        param_axes = iter(range(self.mean.ndim))
-        pattern = ['x' if input_axis in self.shared_axes
+        param_axes = iter(range(self.beta.ndim))
+        pattern = ['x' if input_axis in self.axes
                    else next(param_axes)
                    for input_axis in range(input.ndim)]
 
         # apply dimshuffle pattern to all parameters
+        beta = self.beta.dimshuffle(pattern)
+        gamma = self.gamma.dimshuffle(pattern)
         mean = mean.dimshuffle(pattern)
+        std = T.sqrt(var + self.epsilon)
         std = std.dimshuffle(pattern)
-        beta = beta.dimshuffle(pattern)
-        gamma = gamma.dimshuffle(pattern)
 
         # normalize
         # normalized = (input - mean) * (gamma / std) + beta
