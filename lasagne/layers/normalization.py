@@ -309,7 +309,7 @@ class BatchNormLayer(Layer):
         return self.nonlinearity(normalized)
 
 
-def batch_norm(layer, mode='low_mem'):
+def batch_norm(layer, **kwargs):
     """
     Apply batch normalization to an existing layer. This is a convenience
     function modifying an existing layer to include batch normalization: It
@@ -323,11 +323,10 @@ def batch_norm(layer, mode='low_mem'):
     layer : A :class:`Layer` instance
         The layer to apply the normalization to; note that it will be
         irreversibly modified as specified above
-    mode : {'low_mem', 'high_mem'}
-        Specify which batch normalization implementation to use: ``'low_mem'``
-        avoids storing intermediate representations and thus requires less
-        memory, while ``'high_mem'`` can reuse representations for the backward
-        pass and is thus 5-10% faster.
+    **kwargs
+        Any additional keyword arguments are passed on to the
+        :class:`BatchNormLayer` constructor. Especially note the `mode`
+        argument, which controls a memory usage to performance tradeoff.
 
     Returns
     -------
@@ -340,4 +339,4 @@ def batch_norm(layer, mode='low_mem'):
     if hasattr(layer, 'b'):
         del layer.params[layer.b]
         layer.b = None
-    return BatchNormLayer(layer, nonlinearity=nonlinearity, mode=mode)
+    return BatchNormLayer(layer, nonlinearity=nonlinearity, **kwargs)
