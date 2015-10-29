@@ -36,6 +36,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
 
+import theano
 import theano.tensor as T
 
 from .. import init
@@ -219,7 +220,7 @@ class BatchNormLayer(Layer):
             Batch Normalization: Accelerating Deep Network Training by Reducing
             Internal Covariate Shift. http://arxiv.org/abs/1502.03167.
     """
-    def __init__(self, incoming, axes=None, epsilon=1e-4, alpha=0.5,
+    def __init__(self, incoming, axes='auto', epsilon=1e-4, alpha=0.5,
                  nonlinearity=None, mode='low_mem',
                  beta=init.Constant(0), gamma=init.Constant(1),
                  mean=init.Constant(0), var=init.Constant(1), **kwargs):
@@ -335,7 +336,7 @@ def batch_norm(layer, mode='low_mem'):
     """
     nonlinearity = getattr(layer, 'nonlinearity', None)
     if nonlinearity is not None:
-        layer.nonlinearity = lasagne.nonlinearities.identity
+        layer.nonlinearity = nonlinearities.identity
     if hasattr(layer, 'b'):
         del layer.params[layer.b]
         layer.b = None
