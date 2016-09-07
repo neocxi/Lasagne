@@ -24,7 +24,8 @@ book such as "Machine Learning" by Tom Mitchell.
 To learn more about Theano, have a look at the `Theano tutorial`_. You will not
 need all of it, but a basic understanding of how Theano works is required to be
 able to use Lasagne. If you're new to Theano, going through that tutorial up to
-(and including) "Graph Structures" should get you covered!
+(and including) "More Examples" should get you covered! `Graph Structures`_ is
+a good extra read if you're curious about its inner workings.
 
 
 Run the MNIST example
@@ -49,7 +50,10 @@ If everything is set up correctly, you will get an output like the following:
 
   Using gpu device 0: GeForce GT 640
   Loading data...
-  Downloading MNIST dataset...
+  Downloading train-images-idx3-ubyte.gz
+  Downloading train-labels-idx1-ubyte.gz
+  Downloading t10k-images-idx3-ubyte.gz
+  Downloading t10k-labels-idx1-ubyte.gz
   Building model and compiling functions...
   Starting training...
 
@@ -378,7 +382,7 @@ And finally a 10-unit softmax output layer, again with 50% dropout:
     network = lasagne.layers.DenseLayer(
             lasagne.layers.dropout(network, p=.5),
             num_units=10,
-            nonlinearity=lasagne.nonlinearities.rectify)
+            nonlinearity=lasagne.nonlinearities.softmax)
 
     return network
 
@@ -606,6 +610,7 @@ it simple to create your own.
 .. _Convolutional Neural Networks for Visual Recognition: http://cs231n.github.io/
 .. _Neural Networks and Deep Learning: http://neuralnetworksanddeeplearning.com/
 .. _Theano tutorial: http://deeplearning.net/software/theano/tutorial/
+.. _Graph Structures: http://deeplearning.net/software/theano/extending/graphstructures.html
 .. _mnist.py: https://github.com/Lasagne/Lasagne/blob/master/examples/mnist.py
 .. [Hinton2012] Improving neural networks by preventing co-adaptation
    of feature detectors. http://arxiv.org/abs/1207.0580

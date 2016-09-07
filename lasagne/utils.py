@@ -76,6 +76,29 @@ def as_theano_expression(input):
                             "exception: %s)" % (type(input), e))
 
 
+def collect_shared_vars(expressions):
+    """Returns all shared variables the given expression(s) depend on.
+
+    Parameters
+    ----------
+    expressions : Theano expression or iterable of Theano expressions
+        The expressions to collect shared variables from.
+
+    Returns
+    -------
+    list of Theano shared variables
+        All shared variables the given expression(s) depend on, in fixed order
+        (as found by a left-recursive depth-first search). If some expressions
+        are shared variables themselves, they are included in the result.
+    """
+    # wrap single expression in list
+    if isinstance(expressions, theano.Variable):
+        expressions = [expressions]
+    # return list of all shared variables
+    return [v for v in theano.gof.graph.inputs(reversed(expressions))
+            if isinstance(v, theano.compile.SharedVariable)]
+
+
 def one_hot(x, m=None):
     """One-hot representation of integer vector.
 
@@ -130,9 +153,11 @@ def unique(l):
         A list of elements of `l` without duplicates and in the same order.
     """
     new_list = []
+    seen = set()
     for el in l:
-        if el not in new_list:
+        if el not in seen:
             new_list.append(el)
+            seen.add(el)
 
     return new_list
 
@@ -182,8 +207,8 @@ def compute_norms(array, norm_axes=None):
 
     Parameters
     ----------
-    array : ndarray
-        Weight array.
+    array : numpy array or Theano expression
+        Weight or bias.
     norm_axes : sequence (list or tuple)
         The axes over which to compute the norm.  This overrides the
         default norm axes defined for the number of dimensions
@@ -192,12 +217,16 @@ def compute_norms(array, norm_axes=None):
         set to a tuple listing all axes but axis 0. The former default is
         useful for working with dense layers, the latter is useful for 1D,
         2D and 3D convolutional layers.
+        Finally, in case `array` is a vector, `norm_axes` is set to an empty
+        tuple, and this function will simply return the absolute value for
+        each element. This is useful when the function is applied to all
+        parameters of the network, including the bias, without distinction.
         (Optional)
 
     Returns
     -------
-    norms : 1D array
-        1D array of incoming weight vector norms.
+    norms : 1D array or Theano vector (1D)
+        1D array or Theano vector of incoming weight/bias vector norms.
 
     Examples
     --------
@@ -210,21 +239,45 @@ def compute_norms(array, norm_axes=None):
     >>> norms.shape
     (100,)
     """
-    ndim = array.ndim
 
+    # Check if supported type
+    if not isinstance(array, theano.Variable) and \
+       not isinstance(array, np.ndarray):
+        raise RuntimeError(
+            "Unsupported type {}. "
+            "Only theano variables and numpy arrays "
+            "are supported".format(type(array))
+        )
+
+    # Compute default axes to sum over
+    ndim = array.ndim
     if norm_axes is not None:
         sum_over = tuple(norm_axes)
-    elif ndim == 2:  # DenseLayer
+    elif ndim == 1:          # For Biases that are in 1d (e.g. b of DenseLayer)
+        sum_over = ()
+    elif ndim == 2:          # DenseLayer
         sum_over = (0,)
     elif ndim in [3, 4, 5]:  # Conv{1,2,3}DLayer
         sum_over = tuple(range(1, ndim))
     else:
         raise ValueError(
-            "Unsupported tensor dimensionality {}."
+            "Unsupported tensor dimensionality {}. "
             "Must specify `norm_axes`".format(array.ndim)
         )
 
-    norms = np.sqrt(np.sum(array**2, axis=sum_over))
+    # Run numpy or Theano norm computation
+    if isinstance(array, theano.Variable):
+        # Apply theano version if it is a theano variable
+        if len(sum_over) == 0:
+            norms = T.abs_(array)   # abs if we have nothing to sum over
+        else:
+            norms = T.sqrt(T.sum(array**2, axis=sum_over))
+    elif isinstance(array, np.ndarray):
+        # Apply the numpy version if ndarray
+        if len(sum_over) == 0:
+            norms = abs(array)     # abs if we have nothing to sum over
+        else:
+            norms = np.sqrt(np.sum(array**2, axis=sum_over))
 
     return norms
 
@@ -236,82 +289,91 @@ def create_param(spec, shape, name=None):
 
     Parameters
     ----------
-    spec : numpy array, Theano shared variable, or callable
+    spec : scalar number, numpy array, Theano expression, or callable
         Either of the following:
 
-        * a numpy array with the initial parameter values
-        * a Theano shared variable representing the parameters
+        * a scalar or a numpy array with the initial parameter values
+        * a Theano expression or shared variable representing the parameters
         * a function or callable that takes the desired shape of
           the parameter array as its single argument and returns
-          a numpy array.
+          a numpy array, a Theano expression, or a shared variable
+          representing the parameters.
 
     shape : iterable of int
         a tuple or other iterable of integers representing the desired
         shape of the parameter array.
 
     name : string, optional
-        If a new variable is created, the name to give to the parameter
-        variable. This is ignored if `spec` is already a Theano shared
-        variable.
+        The name to give to the parameter variable. Ignored if `spec`
+        is or returns a Theano expression or shared variable that
+        already has a name.
+
 
     Returns
     -------
-    Theano shared variable
-        a Theano shared variable representing layer parameters. If a
-        numpy array was provided, the variable is initialized to
-        contain this array. If a shared variable was provided, it is
-        simply returned. If a callable was provided, it is called, and
-        its output is used to initialize the variable.
+    Theano shared variable or Theano expression
+        A Theano shared variable or expression representing layer parameters.
+        If a scalar or a numpy array was provided, a shared variable is
+        initialized to contain this array. If a shared variable or expression
+        was provided, it is simply returned. If a callable was provided, it is
+        called, and its output is used to initialize a shared variable.
 
     Notes
     -----
     This function is called by :meth:`Layer.add_param()` in the constructor
     of most :class:`Layer` subclasses. This enables those layers to
-    support initialization with numpy arrays, existing Theano shared
-    variables, and callables for generating initial parameter values.
+    support initialization with scalars, numpy arrays, existing Theano shared
+    variables or expressions, and callables for generating initial parameter
+    values, Theano expressions, or shared variables.
     """
+    import numbers  # to check if argument is a number
     shape = tuple(shape)  # convert to tuple if needed
     if any(d <= 0 for d in shape):
         raise ValueError((
             "Cannot create param with a non-positive shape dimension. "
             "Tried to create param with shape=%r, name=%r") % (shape, name))
 
-    if isinstance(spec, theano.compile.SharedVariable):
-        # We cannot check the shape here, the shared variable might not be
-        # initialized correctly yet. We can check the dimensionality
-        # though. Note that we cannot assign a name here. We could assign
-        # to the `name` attribute of the shared variable, but we shouldn't
-        # because the user may have already named the variable and we don't
-        # want to override this.
+    err_prefix = "cannot initialize parameter %s: " % name
+    if callable(spec):
+        spec = spec(shape)
+        err_prefix += "the %s returned by the provided callable"
+    else:
+        err_prefix += "the provided %s"
+
+    if isinstance(spec, numbers.Number) or isinstance(spec, np.generic) \
+            and spec.dtype.kind in 'biufc':
+        spec = np.asarray(spec)
+
+    if isinstance(spec, np.ndarray):
+        if spec.shape != shape:
+            raise ValueError("%s has shape %s, should be %s" %
+                             (err_prefix % "numpy array", spec.shape, shape))
+        # We assume parameter variables do not change shape after creation.
+        # We can thus fix their broadcast pattern, to allow Theano to infer
+        # broadcastable dimensions of expressions involving these parameters.
+        bcast = tuple(s == 1 for s in shape)
+        spec = theano.shared(spec, broadcastable=bcast)
+
+    if isinstance(spec, theano.Variable):
+        # We cannot check the shape here, Theano expressions (even shared
+        # variables) do not have a fixed compile-time shape. We can check the
+        # dimensionality though.
         if spec.ndim != len(shape):
-            raise RuntimeError("shared variable has %d dimensions, "
-                               "should be %d" % (spec.ndim, len(shape)))
+            raise ValueError("%s has %d dimensions, should be %d" %
+                             (err_prefix % "Theano variable", spec.ndim,
+                              len(shape)))
+        # We only assign a name if the user hasn't done so already.
+        if not spec.name:
+            spec.name = name
         return spec
 
-    elif isinstance(spec, np.ndarray):
-        if spec.shape != shape:
-            raise RuntimeError("parameter array has shape %s, should be "
-                               "%s" % (spec.shape, shape))
-        return theano.shared(spec, name=name)
-
-    elif hasattr(spec, '__call__'):
-        arr = spec(shape)
-        try:
-            arr = floatX(arr)
-        except Exception:
-            raise RuntimeError("cannot initialize parameters: the "
-                               "provided callable did not return an "
-                               "array-like value")
-        if arr.shape != shape:
-            raise RuntimeError("cannot initialize parameters: the "
-                               "provided callable did not return a value "
-                               "with the correct shape")
-        return theano.shared(arr, name=name)
-
     else:
-        raise RuntimeError("cannot initialize parameters: 'spec' is not "
-                           "a numpy array, a Theano shared variable, or a "
-                           "callable")
+        if "callable" in err_prefix:
+            raise TypeError("%s is not a numpy array or a Theano expression" %
+                            (err_prefix % "value"))
+        else:
+            raise TypeError("%s is not a numpy array, a Theano expression, "
+                            "or a callable" % (err_prefix % "spec"))
 
 
 def unroll_scan(fn, sequences, outputs_info, non_sequences, n_steps,

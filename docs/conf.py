@@ -39,6 +39,10 @@ extensions = [
 #    'sphinx.ext.napoleon',  # alternative to numpydoc -- looks a bit worse.
 ]
 
+# See https://github.com/rtfd/readthedocs.org/issues/283
+mathjax_path = ('https://cdn.mathjax.org/mathjax/latest/MathJax.js?'
+                'config=TeX-AMS-MML_HTMLorMML')
+
 # see http://stackoverflow.com/q/12206334/562769
 numpydoc_show_class_members = False
 
@@ -147,7 +151,7 @@ if os.environ.get('READTHEDOCS') != 'True':
         pass  # assume we have sphinx >= 1.3
     else:
         html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
-html_theme = 'sphinx_rtd_theme'
+    html_theme = 'sphinx_rtd_theme'
 def setup(app):
     app.add_stylesheet("fix_rtd.css")
 
@@ -322,6 +326,7 @@ import theano
 import theano.sandbox.cuda
 
 theano.config = Mock(device='gpu')
+theano.sandbox.cuda.cuda_enabled = True
 theano.sandbox.cuda.dnn = Mock(dnn_available=lambda: True)
 
 import sys

@@ -3,16 +3,23 @@ Tools to train neural nets in Theano
 """
 
 try:
+    install_instr = """
+
+Please make sure you install a recent enough version of Theano. Note that a
+simple 'pip install theano' will usually give you a version that is too old
+for Lasagne. See the installation docs for more details:
+http://lasagne.readthedocs.org/en/latest/user/installation.html#theano"""
     import theano
 except ImportError:  # pragma: no cover
-    raise ImportError("""Could not import Theano.
-
-Please make sure you install a recent enough version of Theano.  See
-section 'Install from PyPI' in the installation docs for more details:
-http://lasagne.readthedocs.org/en/latest/user/installation.html#install-from-pypi
-""")
+    raise ImportError("Could not import Theano." + install_instr)
 else:
+    try:
+        import theano.tensor.signal.pool
+    except ImportError:  # pragma: no cover
+        raise ImportError("Your Theano version is too old." + install_instr)
+    del install_instr
     del theano
+
 
 from . import nonlinearities
 from . import init
@@ -24,6 +31,4 @@ from . import updates
 from . import utils
 
 
-import pkg_resources
-__version__ = pkg_resources.get_distribution("Lasagne").version
-del pkg_resources
+__version__ = "0.2.dev1"

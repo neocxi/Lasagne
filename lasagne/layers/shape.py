@@ -44,9 +44,14 @@ class FlattenLayer(Layer):
             raise ValueError('Dim must be >0, was %i', outdim)
 
     def get_output_shape_for(self, input_shape):
-        shp = [input_shape[i] for i in range(self.outdim-1)]
-        shp += [int(np.prod(input_shape[(self.outdim-1):]))]
-        return tuple(shp)
+        to_flatten = input_shape[self.outdim - 1:]
+
+        if any(s is None for s in to_flatten):
+            flattened = None
+        else:
+            flattened = int(np.prod(to_flatten))
+
+        return input_shape[:self.outdim - 1] + (flattened,)
 
     def get_output_for(self, input, **kwargs):
         return input.flatten(self.outdim)
@@ -322,11 +327,14 @@ class PadLayer(Layer):
             widths = self.width
 
         for k, w in enumerate(widths):
-            try:
-                l, r = w
-            except TypeError:
-                l = r = w
-            output_shape[k + self.batch_ndim] += l + r
+            if output_shape[k + self.batch_ndim] is None:
+                continue
+            else:
+                try:
+                    l, r = w
+                except TypeError:
+                    l = r = w
+                output_shape[k + self.batch_ndim] += l + r
         return tuple(output_shape)
 
     def get_output_for(self, input, **kwargs):
@@ -375,9 +383,11 @@ class SliceLayer(Layer):
         output_shape = list(input_shape)
         if isinstance(self.slice, int):
             del output_shape[self.axis]
-        else:
+        elif input_shape[self.axis] is not None:
             output_shape[self.axis] = len(
                 range(*self.slice.indices(input_shape[self.axis])))
+        else:
+            output_shape[self.axis] = None
         return tuple(output_shape)
 
     def get_output_for(self, input, **kwargs):

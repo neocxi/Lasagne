@@ -1,4 +1,8 @@
 from collections import deque
+from difflib import get_close_matches
+from inspect import getargspec
+from itertools import chain
+from warnings import warn
 
 import theano
 import numpy as np
@@ -146,6 +150,8 @@ def get_output(layer_or_layers, inputs=None, **kwargs):
     """
     from .input import InputLayer
     from .base import MergeLayer
+    # track accepted kwargs used by get_output_for
+    accepted_kwargs = {'deterministic'}
     # obtain topological ordering of all layers the output layer(s) depend on
     treat_as_input = inputs.keys() if isinstance(inputs, dict) else []
     all_layers = get_all_layers(layer_or_layers, treat_as_input)
@@ -183,6 +189,27 @@ def get_output(layer_or_layers, inputs=None, **kwargs):
                                  "mapping this layer to an input expression."
                                  % layer)
             all_outputs[layer] = layer.get_output_for(layer_inputs, **kwargs)
+            try:
+                names, _, _, defaults = getargspec(layer.get_output_for)
+            except TypeError:
+                # If introspection is not possible, skip it
+                pass
+            else:
+                if defaults is not None:
+                    accepted_kwargs |= set(names[-len(defaults):])
+            accepted_kwargs |= set(layer.get_output_kwargs)
+    unused_kwargs = set(kwargs.keys()) - accepted_kwargs
+    if unused_kwargs:
+        suggestions = []
+        for kwarg in unused_kwargs:
+            suggestion = get_close_matches(kwarg, accepted_kwargs)
+            if suggestion:
+                suggestions.append('%s (perhaps you meant %s)'
+                                   % (kwarg, suggestion[0]))
+            else:
+                suggestions.append(kwarg)
+        warn("get_output() was called with unused kwargs:\n\t%s"
+             % "\n\t".join(suggestions))
     # return the output(s) of the requested layer(s) only
     try:
         return [all_outputs[layer] for layer in layer_or_layers]
@@ -263,24 +290,31 @@ def get_output_shape(layer_or_layers, input_shapes=None):
         return all_shapes[layer_or_layers]
 
 
-def get_all_params(layer, **tags):
+def get_all_params(layer, unwrap_shared=True, **tags):
     """
-    This function gathers all parameters of all layers below one or
-    more given :class:`Layer` instances, including the layer(s) itself. Its
-    main use is to collect all parameters of a network just given the output
-    layer(s).
+    Returns a list of Theano shared variables or expressions that
+    parameterize the layer.
 
-    By default, all parameters that participate in the forward pass will be
-    returned. The list can optionally be filtered by specifying tags as keyword
-    arguments. For example, ``trainable=True`` will only return trainable
-    parameters, and ``regularizable=True`` will only return parameters that can
-    be regularized (e.g., by L2 decay).
+    This function gathers all parameters of all layers below one or more given
+    :class:`Layer` instances, including the layer(s) itself. Its main use is to
+    collect all parameters of a network just given the output layer(s).
+
+    By default, all shared variables that participate in the forward pass will
+    be returned. The list can optionally be filtered by specifying tags as
+    keyword arguments. For example, ``trainable=True`` will only return
+    trainable parameters, and ``regularizable=True`` will only return
+    parameters that can be regularized (e.g., by L2 decay).
 
     Parameters
     ----------
     layer : Layer or list
         The :class:`Layer` instance for which to gather all parameters, or a
         list of :class:`Layer` instances.
+
+    unwrap_shared : bool (default: True)
+        Affects only parameters that were set to a Theano expression. If
+        ``True`` the function returns the shared variables contained in
+        the expression, otherwise the Theano expression itself.
 
     **tags (optional)
         tags can be specified to filter the list. Specifying ``tag1=True``
@@ -292,19 +326,51 @@ def get_all_params(layer, **tags):
     Returns
     -------
     params : list
-        A list of Theano shared variables representing the parameters.
+        A list of Theano shared variables or expressions representing
+        the parameters.
+
+    Notes
+    -----
+    If any of the layers' parameters was set to a Theano expression instead
+    of a shared variable, `unwrap_shared` controls whether to return the
+    shared variables involved in that expression (``unwrap_shared=True``,
+    the default), or the expression itself (``unwrap_shared=False``). In
+    either case, tag filtering applies to the expressions, considering all
+    variables within an expression to be tagged the same.
 
     Examples
     --------
+    Collecting all parameters from a two-layer network:
+
     >>> from lasagne.layers import InputLayer, DenseLayer
     >>> l_in = InputLayer((100, 20))
     >>> l1 = DenseLayer(l_in, num_units=50)
-    >>> all_params = get_all_params(l1)
-    >>> all_params == [l1.W, l1.b]
+    >>> l2 = DenseLayer(l1, num_units=30)
+    >>> all_params = get_all_params(l2)
+    >>> all_params == [l1.W, l1.b, l2.W, l2.b]
+    True
+
+    Parameters can be filtered by tags, and parameter expressions are
+    unwrapped to return involved shared variables by default:
+
+    >>> from lasagne.utils import floatX
+    >>> w1 = theano.shared(floatX(.01 * np.random.randn(50, 30)))
+    >>> w2 = theano.shared(floatX(1))
+    >>> l2 = DenseLayer(l1, num_units=30, W=theano.tensor.exp(w1) - w2, b=None)
+    >>> all_params = get_all_params(l2, regularizable=True)
+    >>> all_params == [l1.W, w1, w2]
+    True
+
+    When disabling unwrapping, the expression for ``l2.W`` is returned instead:
+
+    >>> all_params = get_all_params(l2, regularizable=True,
+    ...                             unwrap_shared=False)
+    >>> all_params == [l1.W, l2.W]
     True
     """
     layers = get_all_layers(layer)
-    params = sum([l.get_params(**tags) for l in layers], [])
+    params = chain.from_iterable(l.get_params(
+            unwrap_shared=unwrap_shared, **tags) for l in layers)
     return utils.unique(params)
 
 

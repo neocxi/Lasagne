@@ -1,8 +1,9 @@
+# -*- coding: utf-8 -*-
 """
 Non-linear activation functions for artificial neurons.
 """
 
-import theano.tensor.nnet
+import theano.tensor
 
 
 # sigmoid
@@ -60,6 +61,85 @@ def tanh(x):
     return theano.tensor.tanh(x)
 
 
+# scaled tanh
+class ScaledTanH(object):
+    """Scaled tanh :math:`\\varphi(x) = \\tanh(\\alpha \\cdot x) \\cdot \\beta`
+
+    This is a modified tanh function which allows to rescale both the input and
+    the output of the activation.
+
+    Scaling the input down will result in decreasing the maximum slope of the
+    tanh and as a result it will be in the linear regime in a larger interval
+    of the input space. Scaling the input up will increase the maximum slope
+    of the tanh and thus bring it closer to a step function.
+
+    Scaling the output changes the output interval to :math:`[-\\beta,\\beta]`.
+
+    Parameters
+    ----------
+    scale_in : float32
+        The scale parameter :math:`\\alpha` for the input
+
+    scale_out : float32
+        The scale parameter :math:`\\beta` for the output
+
+    Methods
+    -------
+    __call__(x)
+        Apply the scaled tanh function to the activation `x`.
+
+    Examples
+    --------
+    In contrast to other activation functions in this module, this is
+    a class that needs to be instantiated to obtain a callable:
+
+    >>> from lasagne.layers import InputLayer, DenseLayer
+    >>> l_in = InputLayer((None, 100))
+    >>> from lasagne.nonlinearities import ScaledTanH
+    >>> scaled_tanh = ScaledTanH(scale_in=0.5, scale_out=2.27)
+    >>> l1 = DenseLayer(l_in, num_units=200, nonlinearity=scaled_tanh)
+
+    Notes
+    -----
+    LeCun et al. (in [1]_, Section 4.4) suggest ``scale_in=2./3`` and
+    ``scale_out=1.7159``, which has :math:`\\varphi(\\pm 1) = \\pm 1`,
+    maximum second derivative at 1, and an effective gain close to 1.
+
+    By carefully matching :math:`\\alpha` and :math:`\\beta`, the nonlinearity
+    can also be tuned to preserve the mean and variance of its input:
+
+      * ``scale_in=0.5``, ``scale_out=2.4``: If the input is a random normal
+        variable, the output will have zero mean and unit variance.
+      * ``scale_in=1``, ``scale_out=1.6``: Same property, but with a smaller
+        linear regime in input space.
+      * ``scale_in=0.5``, ``scale_out=2.27``: If the input is a uniform normal
+        variable, the output will have zero mean and unit variance.
+      * ``scale_in=1``, ``scale_out=1.48``: Same property, but with a smaller
+        linear regime in input space.
+
+    References
+    ----------
+    .. [1] LeCun, Yann A., et al. (1998):
+       Efficient BackProp,
+       http://link.springer.com/chapter/10.1007/3-540-49430-8_2,
+       http://yann.lecun.com/exdb/publis/pdf/lecun-98b.pdf
+    .. [2] Masci, Jonathan, et al. (2011):
+       Stacked Convolutional Auto-Encoders for Hierarchical Feature Extraction,
+       http://link.springer.com/chapter/10.1007/978-3-642-21735-7_7,
+       http://people.idsia.ch/~ciresan/data/icann2011.pdf
+    """
+
+    def __init__(self, scale_in=1, scale_out=1):
+        self.scale_in = scale_in
+        self.scale_out = scale_out
+
+    def __call__(self, x):
+        return theano.tensor.tanh(x * self.scale_in) * self.scale_out
+
+
+ScaledTanh = ScaledTanH  # alias with alternative capitalization
+
+
 # rectify
 def rectify(x):
     """Rectify activation function :math:`\\varphi(x) = \\max(0, x)`
@@ -74,11 +154,7 @@ def rectify(x):
     float32
         The output of the rectify function applied to the activation.
     """
-    # The following is faster than T.maximum(0, x),
-    # and it works with nonsymbolic inputs as well.
-    # Thanks to @SnipyHollow for pointing this out. Also see:
-    # https://github.com/Lasagne/Lasagne/pull/163#issuecomment-81765117
-    return 0.5 * (x + abs(x))
+    return theano.tensor.nnet.relu(x)
 
 
 # leaky rectify
@@ -141,15 +217,7 @@ class LeakyRectify(object):
         self.leakiness = leakiness
 
     def __call__(self, x):
-        if self.leakiness:
-            # The following is faster than T.maximum(leakiness * x, x),
-            # and it works with nonsymbolic inputs as well. Also see:
-            # https://github.com/Lasagne/Lasagne/pull/163#issuecomment-81765117
-            f1 = 0.5 * (1 + self.leakiness)
-            f2 = 0.5 * (1 - self.leakiness)
-            return f1 * x + f2 * abs(x)
-        else:
-            return rectify(x)
+        return theano.tensor.nnet.relu(x, self.leakiness)
 
 
 leaky_rectify = LeakyRectify()  # shortcut with default leakiness
@@ -164,6 +232,58 @@ very_leaky_rectify.__doc__ = """very_leaky_rectify(x)
 
      Instance of :class:`LeakyRectify` with leakiness :math:`\\alpha=1/3`
      """
+
+
+# elu
+def elu(x):
+    """Exponential Linear Unit :math:`\\varphi(x) = (x > 0) ? x : e^x - 1`
+
+    The Exponential Linear Unit (ELU) was introduced in [1]_. Compared to the
+    linear rectifier :func:`rectify`, it has a mean activation closer to zero
+    and nonzero gradient for negative input, which can help convergence.
+    Compared to the leaky rectifier :class:`LeakyRectify`, it saturates for
+    highly negative inputs.
+
+    Parameters
+    ----------
+    x : float32
+        The activation (the summed, weighed input of a neuron).
+
+    Returns
+    -------
+    float32
+        The output of the exponential linear unit for the activation.
+
+    Notes
+    -----
+    In [1]_, an additional parameter :math:`\\alpha` controls the (negative)
+    saturation value for negative inputs, but is set to 1 for all experiments.
+    It is omitted here.
+
+    References
+    ----------
+    .. [1] Djork-Arné Clevert, Thomas Unterthiner, Sepp Hochreiter (2015):
+       Fast and Accurate Deep Network Learning by Exponential Linear Units
+       (ELUs), http://arxiv.org/abs/1511.07289
+    """
+    return theano.tensor.switch(x > 0, x, theano.tensor.exp(x) - 1)
+
+
+# softplus
+def softplus(x):
+    """Softplus activation function :math:`\\varphi(x) = \\log(1 + e^x)`
+
+    Parameters
+    ----------
+    x : float32
+        The activation (the summed, weighted input of a neuron).
+
+    Returns
+    -------
+    float32
+        The output of the softplus function applied to the activation.
+    """
+    return theano.tensor.nnet.softplus(x)
 
 
 # linear

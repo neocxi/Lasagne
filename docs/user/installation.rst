@@ -10,9 +10,10 @@ tight coupling to Theano, you will have to install a recent version of Theano
 (usually more recent than the latest official release!) fitting the version of
 Lasagne you choose to install.
 
-Most of the instructions below assume you are running a Linux or Mac system;
-please do not hesitate to suggest instructions for Windows via the *Edit on
-GitHub* link on the top right!
+Most of the instructions below assume you are running a Linux or Mac system,
+but are otherwise very generic. For detailed step-by-step instructions for
+specific platforms including Windows, check our `From Zero to Lasagne
+<https://github.com/Lasagne/Lasagne/wiki/From-Zero-to-Lasagne>`_ guides.
 
 If you run into any trouble, please check the `Theano installation instructions
 <http://deeplearning.net/software/theano/install.html>`_ which cover installing
@@ -188,7 +189,7 @@ your GPU (the first CUDA-capable GPU in your system if you have multiple ones):
 
 .. code-block:: bash
 
-  THEANO_FLAGS=device=gpu python -c "import theano; print theano.sandbox.cuda.device_properties(0)"
+  THEANO_FLAGS=device=gpu python -c "import theano; print(theano.sandbox.cuda.device_properties(0))"
 
 To configure Theano to use the GPU by default, create a file ``.theanorc``
 directly in your home directory, with the following contents:
@@ -222,7 +223,27 @@ To check whether it is found by Theano, run the following command:
 
 .. code-block:: bash
 
-  python -c "import theano; print theano.sandbox.cuda.dnn.dnn_available() or theano.sandbox.cuda.dnn.dnn_available.msg"
+  python -c "from theano.sandbox.cuda.dnn import dnn_available as d; print(d() or d.msg)"
 
 It will print ``True`` if everything is fine, or an error message otherwise.
 There are no additional steps required for Theano to make use of cuDNN.
+
+Docker
+======
+
+Instead of manually installing Theano and Lasagne on your machines as described above,
+you may want to use a pre-made `Docker <https://www.docker.com/what-docker>`_
+image: `Lasagne Docker (CPU) <https://hub.docker.com/r/kaixhin/lasagne/>`_ or
+`Lasagne Docker (CUDA) <https://hub.docker.com/r/kaixhin/cuda-lasagne/>`_. These
+are updated on a weekly basis with bleeding-edge builds of Theano and Lasagne.
+Examples of running bash in a Docker container are as follows:
+
+.. code-block:: bash
+
+  sudo docker run -it kaixhin/lasagne
+  sudo nvidia-docker run -it kaixhin/cuda-lasagne:7.0
+
+For a guide to Docker, see the `official docs <https://docs.docker.com>`_.
+CUDA support requires `NVIDIA Docker <https://github.com/NVIDIA/nvidia-docker>`_.
+For more details on how to use the Lasagne Docker images,
+consult the `source project <https://github.com/Kaixhin/dockerfiles>`_.

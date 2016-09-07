@@ -48,6 +48,18 @@ def max_pool_1d_ignoreborder(data, pool_size, stride=None, pad=0):
     return data_pooled
 
 
+def upscale_1d_shape(shape, scale_factor):
+    return (shape[0], shape[1],
+            shape[2] * scale_factor[0])
+
+
+def upscale_1d(data, scale_factor):
+    upscaled = np.zeros(upscale_1d_shape(data.shape, scale_factor))
+    for i in range(scale_factor[0]):
+        upscaled[:, :, i::scale_factor[0]] = data
+    return upscaled
+
+
 def max_pool_2d(data, pool_size, stride):
     data_pooled = max_pool_1d(data, pool_size[1], stride[1])
 
@@ -70,6 +82,27 @@ def max_pool_2d_ignoreborder(data, pool_size, stride, pad):
     return data_pooled
 
 
+def max_pool_3d_ignoreborder(data, pool_size, stride, pad):
+    # Pool last dim
+    data_pooled = max_pool_1d_ignoreborder(
+        data, pool_size[2], stride[2], pad[2])
+    # Swap second to last to back and pool it
+    data_pooled = np.swapaxes(data_pooled, -1, -2)
+    data_pooled = max_pool_1d_ignoreborder(
+        data_pooled, pool_size[1], stride[1], pad[1])
+
+    # Swap third to last and pool
+    data_pooled = np.swapaxes(data_pooled, -1, -3)
+    data_pooled = max_pool_1d_ignoreborder(
+        data_pooled, pool_size[0], stride[0], pad[0])
+
+    # Bring back in order
+    data_pooled = np.swapaxes(data_pooled, -1, -2)
+    data_pooled = np.swapaxes(data_pooled, -2, -3)
+
+    return data_pooled
+
+
 def upscale_2d_shape(shape, scale_factor):
     return (shape[0], shape[1],
             shape[2] * scale_factor[0], shape[3] * scale_factor[1])
@@ -81,6 +114,29 @@ def upscale_2d(data, scale_factor):
         for i in range(scale_factor[1]):
             upscaled[:, :, j::scale_factor[0], i::scale_factor[1]] = data
     return upscaled
+
+
+def spatial_pool(data, pool_dims):
+
+    def ceildiv(a, b):
+        return (a + b - 1) // b
+
+    def floordiv(a, b):
+        return a // b
+
+    input_size = data.shape[2:]
+    pooled_data_list = []
+    for pool_dim in pool_dims:
+        pool_size = tuple(ceildiv(i, pool_dim) for i in input_size)
+        stride_size = tuple(floordiv(i, pool_dim) for i in input_size)
+
+        pooled_part = max_pool_2d_ignoreborder(
+                data, pool_size, stride_size, (0, 0))
+        pooled_part = pooled_part.reshape(
+                data.shape[0], data.shape[1], pool_dim ** 2)
+        pooled_data_list.append(pooled_part)
+
+    return np.concatenate(pooled_data_list, axis=2)
 
 
 class TestFeaturePoolLayer:
@@ -202,6 +258,15 @@ class TestMaxPool1DLayer:
         assert layer.get_output_shape_for((32, 64, None)) == (32, 64, None)
         assert layer.get_output_shape_for((32, 64, 128)) == (32, 64, 64)
 
+    def test_fail_on_mismatching_dimensionality(self):
+        from lasagne.layers.pool import MaxPool1DLayer
+        with pytest.raises(ValueError) as exc:
+            MaxPool1DLayer((10, 20), 3, 2)
+        assert "Expected 3 input dimensions" in exc.value.args[0]
+        with pytest.raises(ValueError) as exc:
+            MaxPool1DLayer((10, 20, 30, 40), 3, 2)
+        assert "Expected 3 input dimensions" in exc.value.args[0]
+
 
 class TestMaxPool2DLayer:
     def pool_test_sets():
@@ -296,6 +361,15 @@ class TestMaxPool2DLayer:
                 input_shape) == output_shape
         except NotImplementedError:
             pytest.skip()
+
+    def test_fail_on_mismatching_dimensionality(self):
+        from lasagne.layers.pool import MaxPool2DLayer
+        with pytest.raises(ValueError) as exc:
+            MaxPool2DLayer((10, 20, 30), 3, 2)
+        assert "Expected 4 input dimensions" in exc.value.args[0]
+        with pytest.raises(ValueError) as exc:
+            MaxPool2DLayer((10, 20, 30, 40, 50), 3, 2)
+        assert "Expected 4 input dimensions" in exc.value.args[0]
 
 
 class TestMaxPool2DCCLayer:
@@ -489,6 +563,169 @@ class TestMaxPool2DNNLayer:
         assert ("Pool2DDNNLayer does not support ignore_border=False" in
                 exc.value.args[0])
 
+    def test_fail_on_mismatching_dimensionality(self):
+        try:
+            from lasagne.layers.dnn import MaxPool2DDNNLayer
+        except ImportError:
+            pytest.skip("cuDNN not available")
+        with pytest.raises(ValueError) as exc:
+            MaxPool2DDNNLayer((10, 20, 30), 3, 2)
+        assert "Expected 4 input dimensions" in exc.value.args[0]
+        with pytest.raises(ValueError) as exc:
+            MaxPool2DDNNLayer((10, 20, 30, 40, 50), 3, 2)
+        assert "Expected 4 input dimensions" in exc.value.args[0]
+
+
+class TestMaxPool3DNNLayer:
+    def pool_test_sets_ignoreborder():
+        for pool_size in [2, 3]:
+            for stride in [1, 2, 3, 4]:
+                for pad in range(pool_size):
+                    yield (pool_size, stride, pad)
+
+    def input_layer(self, output_shape):
+        return Mock(output_shape=output_shape)
+
+    def layer(self, input_layer, pool_size, stride, pad):
+        try:
+            from lasagne.layers.dnn import MaxPool3DDNNLayer
+        except ImportError:
+            pytest.skip("cuDNN not available")
+
+        return MaxPool3DDNNLayer(
+            input_layer,
+            pool_size=pool_size,
+            stride=stride,
+            pad=pad,
+        )
+
+    @pytest.mark.parametrize(
+        "pool_size, stride, pad", list(pool_test_sets_ignoreborder()))
+    def test_get_output_for_ignoreborder(self, pool_size,
+                                         stride, pad):
+        try:
+            input = floatX(np.random.randn(5, 8, 16, 17, 13))
+            input_layer = self.input_layer(input.shape)
+            input_theano = theano.shared(input)
+
+            result = self.layer(
+                input_layer,
+                pool_size,
+                stride,
+                pad,
+            ).get_output_for(input_theano)
+
+            result_eval = result.eval()
+            numpy_result = max_pool_3d_ignoreborder(
+                input, [pool_size]*3, [stride]*3, [pad]*3)
+
+            assert np.all(numpy_result.shape == result_eval.shape)
+            assert np.allclose(result_eval, numpy_result)
+        except NotImplementedError:
+            pytest.skip()
+
+    @pytest.mark.parametrize(
+        "input_shape,output_shape",
+        [((32, 32, 64, 24, 24), (32, 32, 32, 12, 12)),
+         ((None, 32, 48, 24, 24), (None, 32, 24, 12, 12)),
+         ((32, None, 32, 24, 24), (32, None, 16, 12, 12)),
+         ((32, 64, None, 24, 24), (32, 64, None, 12, 12)),
+         ((32, 64, 32, None, 24), (32, 64, 16, None, 12)),
+         ((32, 64, 32, 24, None), (32, 64, 16, 12, None)),
+         ((32, 64, 12, None, None), (32, 64, 6, None, None)),
+         ((32, 64, None, None, None), (32, 64, None, None, None))],
+    )
+    def test_get_output_shape_for(self, input_shape, output_shape):
+        try:
+            input_layer = self.input_layer(input_shape)
+            layer = self.layer(input_layer,
+                               pool_size=(2, 2, 2), stride=None, pad=(0, 0, 0))
+            assert layer.get_output_shape_for(
+                input_shape) == output_shape
+        except NotImplementedError:
+            raise
+        #    pytest.skip()
+
+    def test_not_implemented(self):
+        try:
+            from lasagne.layers.dnn import MaxPool3DDNNLayer
+        except ImportError:
+            pytest.skip("cuDNN not available")
+        with pytest.raises(NotImplementedError) as exc:
+            layer = MaxPool3DDNNLayer((1, 2, 3, 4, 5), pool_size=2,
+                                      ignore_border=False)
+        assert ("Pool3DDNNLayer does not support ignore_border=False" in
+                exc.value.args[0])
+
+    def test_fail_on_mismatching_dimensionality(self):
+        try:
+            from lasagne.layers.dnn import MaxPool3DDNNLayer
+        except ImportError:
+            pytest.skip("cuDNN not available")
+        with pytest.raises(ValueError) as exc:
+            MaxPool3DDNNLayer((10, 20, 30, 40), 3, 2)
+        assert "Expected 5 input dimensions" in exc.value.args[0]
+        with pytest.raises(ValueError) as exc:
+            MaxPool3DDNNLayer((10, 20, 30, 40, 50, 60), 3, 2)
+        assert "Expected 5 input dimensions" in exc.value.args[0]
+
+
+class TestUpscale1DLayer:
+    def scale_factor_test_sets():
+        for scale_factor in [2, 3]:
+            yield scale_factor
+
+    def input_layer(self, output_shape):
+        return Mock(output_shape=output_shape)
+
+    def layer(self, input_layer, scale_factor):
+        from lasagne.layers.pool import Upscale1DLayer
+        return Upscale1DLayer(
+            input_layer,
+            scale_factor=scale_factor,
+        )
+
+    def test_invalid_scale_factor(self):
+        from lasagne.layers.pool import Upscale1DLayer
+        inlayer = self.input_layer((128, 3, 32))
+        with pytest.raises(ValueError):
+            Upscale1DLayer(inlayer, scale_factor=0)
+        with pytest.raises(ValueError):
+            Upscale1DLayer(inlayer, scale_factor=-1)
+        with pytest.raises(ValueError):
+            Upscale1DLayer(inlayer, scale_factor=(0))
+
+    @pytest.mark.parametrize(
+        "scale_factor", list(scale_factor_test_sets()))
+    def test_get_output_for(self, scale_factor):
+        input = floatX(np.random.randn(8, 16, 17))
+        input_layer = self.input_layer(input.shape)
+        input_theano = theano.shared(input)
+        result = self.layer(
+            input_layer,
+            (scale_factor),
+        ).get_output_for(input_theano)
+
+        result_eval = result.eval()
+        numpy_result = upscale_1d(input, (scale_factor, scale_factor))
+
+        assert np.all(numpy_result.shape == result_eval.shape)
+        assert np.allclose(result_eval, numpy_result)
+
+    @pytest.mark.parametrize(
+        "input_shape,output_shape",
+        [((32, 64, 24), (32, 64, 48)),
+         ((None, 64, 24), (None, 64, 48)),
+         ((32, None, 24), (32, None, 48)),
+         ((32, 64, None), (32, 64, None))],
+    )
+    def test_get_output_shape_for(self, input_shape, output_shape):
+        input_layer = self.input_layer(input_shape)
+        layer = self.layer(input_layer,
+                           scale_factor=(2))
+        assert layer.get_output_shape_for(
+            input_shape) == output_shape
+
 
 class TestUpscale2DLayer:
     def scale_factor_test_sets():
@@ -601,3 +838,68 @@ class TestGlobalPoolLayer(object):
         np_result = input.get_value().reshape((2, 3, -1)).mean(-1)
 
         assert np.allclose(result, np_result)
+
+
+class TestSpatialPyramidPoolingDNNLayer:
+    def pool_dims_test_sets():
+        for pyramid_level in [2, 3, 4]:
+            pool_dims = list(range(1, pyramid_level))
+            yield pool_dims
+
+    def input_layer(self, output_shape):
+        return Mock(output_shape=output_shape)
+
+    def layer(self, input_layer, pool_dims):
+        try:
+            from lasagne.layers.dnn import SpatialPyramidPoolingDNNLayer
+        except ImportError:
+            pytest.skip("cuDNN not available")
+
+        return SpatialPyramidPoolingDNNLayer(input_layer, pool_dims=pool_dims)
+
+    @pytest.mark.parametrize(
+        "pool_dims", list(pool_dims_test_sets()))
+    def test_get_output_for(self, pool_dims):
+        try:
+            input = floatX(np.random.randn(8, 16, 17, 13))
+            input_layer = self.input_layer(input.shape)
+            input_theano = theano.shared(input)
+            layer = self.layer(input_layer, pool_dims)
+
+            result = layer.get_output_for(input_theano)
+
+            result_eval = result.eval()
+            numpy_result = spatial_pool(input, pool_dims)
+
+            assert result_eval.shape == numpy_result.shape
+            assert np.allclose(result_eval, numpy_result)
+            assert result_eval.shape == layer.output_shape
+        except NotImplementedError:
+            pytest.skip()
+
+    @pytest.mark.parametrize(
+        "input_shape,output_shape",
+        [((32, 64, 24, 24), (32, 64, 21)),
+         ((None, 64, 23, 25), (None, 64, 21)),
+         ((32, None, 22, 26), (32, None, 21)),
+         ((None, None, None, None), (None, None, 21))],
+    )
+    def test_get_output_shape_for(self, input_shape, output_shape):
+        try:
+            input_layer = self.input_layer(input_shape)
+            layer = self.layer(input_layer, pool_dims=[1, 2, 4])
+            assert layer.get_output_shape_for(input_shape) == output_shape
+        except NotImplementedError:
+            raise
+
+    def test_fail_on_mismatching_dimensionality(self):
+        try:
+            from lasagne.layers.dnn import SpatialPyramidPoolingDNNLayer
+        except ImportError:
+            pytest.skip("cuDNN not available")
+        with pytest.raises(ValueError) as exc:
+            SpatialPyramidPoolingDNNLayer((10, 20, 30))
+        assert "Expected 4 input dimensions" in exc.value.args[0]
+        with pytest.raises(ValueError) as exc:
+            SpatialPyramidPoolingDNNLayer((10, 20, 30, 40, 50))
+        assert "Expected 4 input dimensions" in exc.value.args[0]

@@ -1,11 +1,13 @@
 import pytest
+
 from lasagne.layers import RecurrentLayer, LSTMLayer, CustomRecurrentLayer
-from lasagne.layers import InputLayer, DenseLayer, GRULayer, Gate
+from lasagne.layers import InputLayer, DenseLayer, GRULayer, Gate, Layer
 from lasagne.layers import helper
 import theano
 import theano.tensor as T
 import numpy as np
 import lasagne
+from mock import Mock
 
 
 def test_recurrent_return_shape():
@@ -57,47 +59,102 @@ def test_recurrent_nparams_learn_init():
     assert len(lasagne.layers.get_all_params(l_rec, regularizable=False)) == 2
 
 
-def test_recurrent_tensor_init():
-    # check if passing in a TensorVariable to hid_init works
-    num_units = 5
-    batch_size = 3
-    seq_len = 2
-    n_inputs = 4
-    in_shp = (batch_size, seq_len, n_inputs)
-    l_inp = InputLayer(in_shp)
-    hid_init = T.matrix()
+def test_recurrent_hid_init_layer():
+    # test that you can set hid_init to be a layer
+    l_inp = InputLayer((2, 2, 3))
+    l_inp_h = InputLayer((2, 5))
+    l_rec = RecurrentLayer(l_inp, 5, hid_init=l_inp_h)
+
     x = T.tensor3()
+    h = T.matrix()
 
-    l_rec = RecurrentLayer(l_inp, num_units, learn_init=True,
-                           hid_init=hid_init)
-    # check that the tensor is used
-    assert hid_init == l_rec.hid_init
+    output = lasagne.layers.get_output(l_rec, {l_inp: x, l_inp_h: h})
 
-    # b, W_hid_to_hid and W_in_to_hid, should not return any inits
-    assert len(lasagne.layers.get_all_params(l_rec, trainable=True)) == 3
 
-    # b, should not return any inits
-    assert len(lasagne.layers.get_all_params(l_rec, regularizable=False)) == 1
+def test_recurrent_nparams_hid_init_layer():
+    # test that you can see layers through hid_init
+    l_inp = InputLayer((2, 2, 3))
+    l_inp_h = InputLayer((2, 5))
+    l_inp_h_de = DenseLayer(l_inp_h, 7)
+    l_rec = RecurrentLayer(l_inp, 7, hid_init=l_inp_h_de)
 
-    # check that it compiles and runs
-    output = lasagne.layers.get_output(l_rec, x)
-    x_test = np.ones(in_shp, dtype='float32')
-    hid_init_test = np.ones((batch_size, num_units), dtype='float32')
-    output_val = output.eval({x: x_test, hid_init: hid_init_test})
-    assert isinstance(output_val, np.ndarray)
+    # directly check the layers can be seen through hid_init
+    assert lasagne.layers.get_all_layers(l_rec) == [l_inp, l_inp_h, l_inp_h_de,
+                                                    l_rec]
+
+    # b, W_hid_to_hid and W_in_to_hid + W + b
+    assert len(lasagne.layers.get_all_params(l_rec, trainable=True)) == 5
+
+    # b (recurrent) + b (dense)
+    assert len(lasagne.layers.get_all_params(l_rec, regularizable=False)) == 2
+
+
+def test_recurrent_hid_init_mask():
+    # test that you can set hid_init to be a layer when a mask is provided
+    l_inp = InputLayer((2, 2, 3))
+    l_inp_h = InputLayer((2, 5))
+    l_inp_msk = InputLayer((2, 2))
+    l_rec = RecurrentLayer(l_inp, 5, hid_init=l_inp_h, mask_input=l_inp_msk)
+
+    x = T.tensor3()
+    h = T.matrix()
+    msk = T.matrix()
+
+    inputs = {l_inp: x, l_inp_h: h, l_inp_msk: msk}
+    output = lasagne.layers.get_output(l_rec, inputs)
+
+
+def test_recurrent_hid_init_layer_eval():
+    # Test `hid_init` as a `Layer` with some dummy input. Compare the output of
+    # a network with a `Layer` as input to `hid_init` to a network with a
+    # `np.array` as input to `hid_init`
+    n_units = 7
+    n_test_cases = 2
+    in_shp = (n_test_cases, 2, 3)
+    in_h_shp = (1, n_units)
+
+    # dummy inputs
+    X_test = np.ones(in_shp, dtype=theano.config.floatX)
+    Xh_test = np.ones(in_h_shp, dtype=theano.config.floatX)
+    Xh_test_batch = np.tile(Xh_test, (n_test_cases, 1))
+
+    # network with `Layer` initializer for hid_init
+    l_inp = InputLayer(in_shp)
+    l_inp_h = InputLayer(in_h_shp)
+    l_rec_inp_layer = RecurrentLayer(l_inp, n_units, hid_init=l_inp_h,
+                                     nonlinearity=None)
+
+    # network with `np.array` initializer for hid_init
+    l_rec_nparray = RecurrentLayer(l_inp, n_units, hid_init=Xh_test,
+                                   nonlinearity=None)
+
+    # copy network parameters from l_rec_inp_layer to l_rec_nparray
+    l_il_param = dict([(p.name, p) for p in l_rec_inp_layer.get_params()])
+    l_rn_param = dict([(p.name, p) for p in l_rec_nparray.get_params()])
+    for k, v in l_rn_param.items():
+        if k in l_il_param:
+            v.set_value(l_il_param[k].get_value())
+
+    # build the theano functions
+    X = T.tensor3()
+    Xh = T.matrix()
+    output_inp_layer = lasagne.layers.get_output(l_rec_inp_layer,
+                                                 {l_inp: X, l_inp_h: Xh})
+    output_nparray = lasagne.layers.get_output(l_rec_nparray, {l_inp: X})
+
+    # test both nets with dummy input
+    output_val_inp_layer = output_inp_layer.eval({X: X_test,
+                                                  Xh: Xh_test_batch})
+    output_val_nparray = output_nparray.eval({X: X_test})
+
+    # check output given `Layer` is the same as with `np.array`
+    assert np.allclose(output_val_inp_layer, output_val_nparray)
 
 
 def test_recurrent_incoming_tuple():
     input_shape = (2, 3, 4)
     l_rec = lasagne.layers.RecurrentLayer(input_shape, 5)
     assert l_rec.input_shapes[0] == input_shape
-
-
-def test_recurrent_init_val_error():
-    # check if errors are raised when init is non matrix tensor
-    hid_init = T.vector()
-    with pytest.raises(ValueError):
-        l_rec = RecurrentLayer(InputLayer((2, 2, 3)), 5, hid_init=hid_init)
 
 
 def test_recurrent_name():
@@ -316,6 +373,26 @@ def test_recurrent_precompute():
     np.testing.assert_almost_equal(output_precompute, output_no_precompute)
 
 
+def test_recurrent_return_final():
+    num_batch, seq_len, n_features = 2, 3, 4
+    num_units = 2
+    in_shp = (num_batch, seq_len, n_features)
+    x_in = np.random.random(in_shp).astype('float32')
+
+    l_inp = InputLayer(in_shp)
+    lasagne.random.get_rng().seed(1234)
+    l_rec_final = RecurrentLayer(l_inp, num_units, only_return_final=True)
+    lasagne.random.get_rng().seed(1234)
+    l_rec_all = RecurrentLayer(l_inp, num_units, only_return_final=False)
+
+    output_final = helper.get_output(l_rec_final).eval({l_inp.input_var: x_in})
+    output_all = helper.get_output(l_rec_all).eval({l_inp.input_var: x_in})
+
+    assert output_final.shape == (output_all.shape[0], output_all.shape[2])
+    assert output_final.shape == lasagne.layers.get_output_shape(l_rec_final)
+    assert np.allclose(output_final, output_all[:, -1])
+
+
 def test_lstm_return_shape():
     num_batch, seq_len, n_features1, n_features2 = 5, 3, 10, 11
     num_units = 6
@@ -378,52 +455,110 @@ def test_lstm_nparams_learn_init():
     assert len(lasagne.layers.get_all_params(l_lstm, regularizable=False)) == 6
 
 
-def test_lstm_tensor_init():
-    # check if passing in TensorVariables to cell_init and hid_init works
-    num_units = 5
-    batch_size = 3
-    seq_len = 2
-    n_inputs = 4
-    in_shp = (batch_size, seq_len, n_inputs)
-    l_inp = InputLayer(in_shp)
-    hid_init = T.matrix()
-    cell_init = T.matrix()
+def test_lstm_hid_init_layer():
+    # test that you can set hid_init to be a layer
+    l_inp = InputLayer((2, 2, 3))
+    l_inp_h = InputLayer((2, 5))
+    l_cell_h = InputLayer((2, 5))
+    l_lstm = LSTMLayer(l_inp, 5, hid_init=l_inp_h, cell_init=l_cell_h)
+
     x = T.tensor3()
+    h = T.matrix()
 
-    l_lstm = LSTMLayer(l_inp, num_units, peepholes=False, learn_init=True,
-                       hid_init=hid_init, cell_init=cell_init)
+    output = lasagne.layers.get_output(l_lstm, {l_inp: x, l_inp_h: h})
 
-    # check that the tensors are used and not overwritten
-    assert cell_init == l_lstm.cell_init
-    assert hid_init == l_lstm.hid_init
 
-    # 3*n_gates, should not return any inits
+def test_lstm_nparams_hid_init_layer():
+    # test that you can see layers through hid_init
+    l_inp = InputLayer((2, 2, 3))
+    l_inp_h = InputLayer((2, 5))
+    l_inp_h_de = DenseLayer(l_inp_h, 7)
+    l_inp_cell = InputLayer((2, 5))
+    l_inp_cell_de = DenseLayer(l_inp_cell, 7)
+    l_lstm = LSTMLayer(l_inp, 7, hid_init=l_inp_h_de, cell_init=l_inp_cell_de)
+
+    # directly check the layers can be seen through hid_init
+    layers_to_find = [l_inp, l_inp_h, l_inp_h_de, l_inp_cell, l_inp_cell_de,
+                      l_lstm]
+    assert lasagne.layers.get_all_layers(l_lstm) == layers_to_find
+
+    # 3*n_gates + 4
     # the 3 is because we have  hid_to_gate, in_to_gate and bias for each gate
-    assert len(lasagne.layers.get_all_params(l_lstm, trainable=True)) == 12
+    # 4 is for the W and b parameters in the two DenseLayer layers
+    assert len(lasagne.layers.get_all_params(l_lstm, trainable=True)) == 19
 
-    # bias params(4), , should not return any inits
-    assert len(lasagne.layers.get_all_params(l_lstm, regularizable=False)) == 4
-
-    # check that it compiles and runs
-    output = lasagne.layers.get_output(l_lstm, x)
-
-    x_test = np.ones(in_shp, dtype='float32')
-    hid_init_test = np.ones((batch_size, num_units), dtype='float32')
-    cell_init_test = np.ones_like(hid_init_test)
-    output_val = output.eval(
-        {x: x_test, cell_init: cell_init_test, hid_init: hid_init_test})
-
-    assert isinstance(output_val, np.ndarray)
+    # GRU bias params(3) + Dense bias params(1) * 2
+    assert len(lasagne.layers.get_all_params(l_lstm, regularizable=False)) == 6
 
 
-def test_lstm_init_val_error():
-    # check if errors are raised when inits are non matrix tensor
-    vector = T.vector()
-    with pytest.raises(ValueError):
-        l_rec = LSTMLayer(InputLayer((2, 2, 3)), 5, hid_init=vector)
+def test_lstm_hid_init_mask():
+    # test that you can set hid_init to be a layer when a mask is provided
+    l_inp = InputLayer((2, 2, 3))
+    l_inp_h = InputLayer((2, 5))
+    l_inp_msk = InputLayer((2, 2))
+    l_cell_h = InputLayer((2, 5))
+    l_lstm = LSTMLayer(l_inp, 5, hid_init=l_inp_h, mask_input=l_inp_msk,
+                       cell_init=l_cell_h)
 
-    with pytest.raises(ValueError):
-        l_rec = LSTMLayer(InputLayer((2, 2, 3)), 5, cell_init=vector)
+    x = T.tensor3()
+    h = T.matrix()
+    msk = T.matrix()
+
+    inputs = {l_inp: x, l_inp_h: h, l_inp_msk: msk}
+    output = lasagne.layers.get_output(l_lstm, inputs)
+
+
+def test_lstm_hid_init_layer_eval():
+    # Test `hid_init` as a `Layer` with some dummy input. Compare the output of
+    # a network with a `Layer` as input to `hid_init` to a network with a
+    # `np.array` as input to `hid_init`
+    n_units = 7
+    n_test_cases = 2
+    in_shp = (n_test_cases, 2, 3)
+    in_h_shp = (1, n_units)
+    in_cell_shp = (1, n_units)
+
+    # dummy inputs
+    X_test = np.ones(in_shp, dtype=theano.config.floatX)
+    Xh_test = np.ones(in_h_shp, dtype=theano.config.floatX)
+    Xc_test = np.ones(in_cell_shp, dtype=theano.config.floatX)
+    Xh_test_batch = np.tile(Xh_test, (n_test_cases, 1))
+    Xc_test_batch = np.tile(Xc_test, (n_test_cases, 1))
+
+    # network with `Layer` initializer for hid_init
+    l_inp = InputLayer(in_shp)
+    l_inp_h = InputLayer(in_h_shp)
+    l_inp_cell = InputLayer(in_cell_shp)
+    l_rec_inp_layer = LSTMLayer(l_inp, n_units, hid_init=l_inp_h,
+                                cell_init=l_inp_cell, nonlinearity=None)
+
+    # network with `np.array` initializer for hid_init
+    l_rec_nparray = LSTMLayer(l_inp, n_units, hid_init=Xh_test,
+                              cell_init=Xc_test, nonlinearity=None)
+
+    # copy network parameters from l_rec_inp_layer to l_rec_nparray
+    l_il_param = dict([(p.name, p) for p in l_rec_inp_layer.get_params()])
+    l_rn_param = dict([(p.name, p) for p in l_rec_nparray.get_params()])
+    for k, v in l_rn_param.items():
+        if k in l_il_param:
+            v.set_value(l_il_param[k].get_value())
+
+    # build the theano functions
+    X = T.tensor3()
+    Xh = T.matrix()
+    Xc = T.matrix()
+    output_inp_layer = lasagne.layers.get_output(l_rec_inp_layer,
+                                                 {l_inp: X, l_inp_h:
+                                                  Xh, l_inp_cell: Xc})
+    output_nparray = lasagne.layers.get_output(l_rec_nparray, {l_inp: X})
+
+    # test both nets with dummy input
+    output_val_inp_layer = output_inp_layer.eval({X: X_test, Xh: Xh_test_batch,
+                                                  Xc: Xc_test_batch})
+    output_val_nparray = output_nparray.eval({X: X_test})
+
+    # check output given `Layer` is the same as with `np.array`
+    assert np.allclose(output_val_inp_layer, output_val_nparray)
 
 
 def test_lstm_grad_clipping():
@@ -572,6 +707,26 @@ def test_lstm_passthrough():
     np.testing.assert_almost_equal(out.eval({l_in.input_var: inp}), inp)
 
 
+def test_lstm_return_final():
+    num_batch, seq_len, n_features = 2, 3, 4
+    num_units = 2
+    in_shp = (num_batch, seq_len, n_features)
+    x_in = np.random.random(in_shp).astype('float32')
+
+    l_inp = InputLayer(in_shp)
+    lasagne.random.get_rng().seed(1234)
+    l_rec_final = LSTMLayer(l_inp, num_units, only_return_final=True)
+    lasagne.random.get_rng().seed(1234)
+    l_rec_all = LSTMLayer(l_inp, num_units, only_return_final=False)
+
+    output_final = helper.get_output(l_rec_final).eval({l_inp.input_var: x_in})
+    output_all = helper.get_output(l_rec_all).eval({l_inp.input_var: x_in})
+
+    assert output_final.shape == (output_all.shape[0], output_all.shape[2])
+    assert output_final.shape == lasagne.layers.get_output_shape(l_rec_final)
+    assert np.allclose(output_final, output_all[:, -1])
+
+
 def test_gru_return_shape():
     num_batch, seq_len, n_features1, n_features2 = 5, 3, 10, 11
     num_units = 6
@@ -623,43 +778,96 @@ def test_gru_nparams_learn_init_true():
     assert len(lasagne.layers.get_all_params(l_gru, regularizable=False)) == 4
 
 
-def test_gru_tensor_init():
-    # check if passing in a TensorVariable to hid_init works
-    num_units = 5
-    batch_size = 3
-    seq_len = 2
-    n_inputs = 4
-    in_shp = (batch_size, seq_len, n_inputs)
-    l_inp = InputLayer(in_shp)
-    hid_init = T.matrix()
+def test_gru_hid_init_layer():
+    # test that you can set hid_init to be a layer
+    l_inp = InputLayer((2, 2, 3))
+    l_inp_h = InputLayer((2, 5))
+    l_gru = GRULayer(l_inp, 5, hid_init=l_inp_h)
+
     x = T.tensor3()
+    h = T.matrix()
 
-    l_lstm = GRULayer(l_inp, num_units, learn_init=True, hid_init=hid_init)
+    output = lasagne.layers.get_output(l_gru, {l_inp: x, l_inp_h: h})
 
-    # check that the tensors are used and not overwritten
-    assert hid_init == l_lstm.hid_init
 
-    # 3*n_gates, should not return any inits
+def test_gru_nparams_hid_init_layer():
+    # test that you can see layers through hid_init
+    l_inp = InputLayer((2, 2, 3))
+    l_inp_h = InputLayer((2, 5))
+    l_inp_h_de = DenseLayer(l_inp_h, 7)
+    l_gru = GRULayer(l_inp, 7, hid_init=l_inp_h_de)
+
+    # directly check the layers can be seen through hid_init
+    assert lasagne.layers.get_all_layers(l_gru) == [l_inp, l_inp_h, l_inp_h_de,
+                                                    l_gru]
+
+    # 3*n_gates + 2
     # the 3 is because we have  hid_to_gate, in_to_gate and bias for each gate
-    assert len(lasagne.layers.get_all_params(l_lstm, trainable=True)) == 9
+    # 2 is for the W and b parameters in the DenseLayer
+    assert len(lasagne.layers.get_all_params(l_gru, trainable=True)) == 11
 
-    # bias params(3), , should not return any inits
-    assert len(lasagne.layers.get_all_params(l_lstm, regularizable=False)) == 3
-
-    # check that it compiles and runs
-    output = lasagne.layers.get_output(l_lstm, x)
-    x_test = np.ones(in_shp, dtype='float32')
-    hid_init_test = np.ones((batch_size, num_units), dtype='float32')
-
-    output_val = output.eval({x: x_test, hid_init: hid_init_test})
-    assert isinstance(output_val, np.ndarray)
+    # GRU bias params(3) + Dense bias params(1)
+    assert len(lasagne.layers.get_all_params(l_gru, regularizable=False)) == 4
 
 
-def test_gru_init_val_error():
-    # check if errors are raised when init is non matrix tensorVariable
-    vector = T.vector()
-    with pytest.raises(ValueError):
-        l_rec = GRULayer(InputLayer((2, 2, 3)), 5, hid_init=vector)
+def test_gru_hid_init_layer_eval():
+    # Test `hid_init` as a `Layer` with some dummy input. Compare the output of
+    # a network with a `Layer` as input to `hid_init` to a network with a
+    # `np.array` as input to `hid_init`
+    n_units = 7
+    n_test_cases = 2
+    in_shp = (n_test_cases, 2, 3)
+    in_h_shp = (1, n_units)
+
+    # dummy inputs
+    X_test = np.ones(in_shp, dtype=theano.config.floatX)
+    Xh_test = np.ones(in_h_shp, dtype=theano.config.floatX)
+    Xh_test_batch = np.tile(Xh_test, (n_test_cases, 1))
+
+    # network with `Layer` initializer for hid_init
+    l_inp = InputLayer(in_shp)
+    l_inp_h = InputLayer(in_h_shp)
+    l_rec_inp_layer = GRULayer(l_inp, n_units, hid_init=l_inp_h)
+
+    # network with `np.array` initializer for hid_init
+    l_rec_nparray = GRULayer(l_inp, n_units, hid_init=Xh_test)
+
+    # copy network parameters from l_rec_inp_layer to l_rec_nparray
+    l_il_param = dict([(p.name, p) for p in l_rec_inp_layer.get_params()])
+    l_rn_param = dict([(p.name, p) for p in l_rec_nparray.get_params()])
+    for k, v in l_rn_param.items():
+        if k in l_il_param:
+            v.set_value(l_il_param[k].get_value())
+
+    # build the theano functions
+    X = T.tensor3()
+    Xh = T.matrix()
+    output_inp_layer = lasagne.layers.get_output(l_rec_inp_layer,
+                                                 {l_inp: X, l_inp_h: Xh})
+    output_nparray = lasagne.layers.get_output(l_rec_nparray, {l_inp: X})
+
+    # test both nets with dummy input
+    output_val_inp_layer = output_inp_layer.eval({X: X_test,
+                                                  Xh: Xh_test_batch})
+    output_val_nparray = output_nparray.eval({X: X_test})
+
+    # check output given `Layer` is the same as with `np.array`
+    assert np.allclose(output_val_inp_layer, output_val_nparray)
+
+
+def test_gru_hid_init_mask():
+    # test that you can set hid_init to be a layer when a mask is provided
+    l_inp = InputLayer((2, 2, 3))
+    l_inp_h = InputLayer((2, 5))
+    l_inp_msk = InputLayer((2, 2))
+    l_gru = GRULayer(l_inp, 5, hid_init=l_inp_h, mask_input=l_inp_msk)
+
+    x = T.tensor3()
+    h = T.matrix()
+    msk = T.matrix()
+
+    inputs = {l_inp: x, l_inp_h: h, l_inp_msk: msk}
+    output = lasagne.layers.get_output(l_gru, inputs)
 
 
 def test_gru_grad_clipping():
@@ -806,6 +1014,26 @@ def test_gru_passthrough():
     np.testing.assert_almost_equal(out.eval({l_in.input_var: inp}), inp)
 
 
+def test_gru_return_final():
+    num_batch, seq_len, n_features = 2, 3, 4
+    num_units = 2
+    in_shp = (num_batch, seq_len, n_features)
+    x_in = np.random.random(in_shp).astype('float32')
+
+    l_inp = InputLayer(in_shp)
+    lasagne.random.get_rng().seed(1234)
+    l_rec_final = GRULayer(l_inp, num_units, only_return_final=True)
+    lasagne.random.get_rng().seed(1234)
+    l_rec_all = GRULayer(l_inp, num_units, only_return_final=False)
+
+    output_final = helper.get_output(l_rec_final).eval({l_inp.input_var: x_in})
+    output_all = helper.get_output(l_rec_all).eval({l_inp.input_var: x_in})
+
+    assert output_final.shape == (output_all.shape[0], output_all.shape[2])
+    assert output_final.shape == lasagne.layers.get_output_shape(l_rec_final)
+    assert np.allclose(output_final, output_all[:, -1])
+
+
 def test_gradient_steps_error():
     # Check that error is raised if gradient_steps is not -1 and scan_unroll
     # is true
@@ -832,3 +1060,42 @@ def test_unroll_none_input_error():
 
     with pytest.raises(ValueError):
         GRULayer(l_in, 5, unroll_scan=True)
+
+
+def test_CustomRecurrentLayer_child_kwargs():
+    in_shape = (2, 3, 4)
+    n_hid = 5
+    # Construct mock for input-to-hidden layer
+    in_to_hid = Mock(
+        Layer,
+        output_shape=(in_shape[0]*in_shape[1], n_hid),
+        input_shape=(in_shape[0]*in_shape[1], in_shape[2]),
+        input_layer=InputLayer((in_shape[0]*in_shape[1], in_shape[2])),
+        get_output_kwargs=['foo'])
+    # These two functions get called, need to return dummy values for them
+    in_to_hid.get_output_for.return_value = T.matrix()
+    in_to_hid.get_params.return_value = []
+    # As above, for hidden-to-hidden layer
+    hid_to_hid = Mock(
+        Layer,
+        output_shape=(in_shape[0], n_hid),
+        input_shape=(in_shape[0], n_hid),
+        input_layer=InputLayer((in_shape[0], n_hid)),
+        get_output_kwargs=[])
+    hid_to_hid.get_output_for.return_value = T.matrix()
+    hid_to_hid.get_params.return_value = []
+    # Construct a CustomRecurrentLayer using these Mocks
+    l_rec = lasagne.layers.CustomRecurrentLayer(
+        InputLayer(in_shape), in_to_hid, hid_to_hid)
+    # Call get_output with a kwarg, should be passd to in_to_hid and hid_to_hid
+    helper.get_output(l_rec, foo='bar')
+    # Retrieve the arguments used to call in_to_hid.get_output_for
+    args, kwargs = in_to_hid.get_output_for.call_args
+    # Should be one argument - the Theano expression
+    assert len(args) == 1
+    # One keywould argument - should be 'foo' -> 'bar'
+    assert kwargs == {'foo': 'bar'}
+    # Same as with in_to_hid
+    args, kwargs = hid_to_hid.get_output_for.call_args
+    assert len(args) == 1
+    assert kwargs == {'foo': 'bar'}

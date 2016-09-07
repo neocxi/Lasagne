@@ -25,6 +25,10 @@ class TestFlattenLayer:
         input_shape = (2, 3, 4, 5)
         assert layer.get_output_shape_for(input_shape) == (2, 3 * 4 * 5)
 
+    def test_get_output_shape_for_contain_none(self, layer):
+        input_shape = (2, 3, None, 5)
+        assert layer.get_output_shape_for(input_shape) == (2, None)
+
     def test_get_output_for(self, layer):
         input = np.random.random((2, 3, 4, 5))
         result = layer.get_output_for(theano.shared(input)).eval()
@@ -67,6 +71,9 @@ class TestPadLayer:
         [(3, (2, 3, 4, 5), (2, 3, 10, 11)),
          ((2, 3), (2, 3, 4, 5), (2, 3, 8, 11)),
          (((1, 2), (3, 4)), (2, 3, 4, 5), (2, 3, 7, 12)),
+         (3, (2, 3, None, 5), (2, 3, None, 11)),
+         ((2, 3), (2, 3, 4, None), (2, 3, 8, None)),
+         (((1, 2), (3, 4)), (None, 3, None, None), (None, 3, None, None)),
          ])
     def test_get_output_shape_for(self, layerclass,
                                   width, input_shape, output_shape):
@@ -275,3 +282,10 @@ def test_slice_layer():
     aeq(get_output(l_slice_ax0, x).eval(), x1)
     aeq(get_output(l_slice_ax1, x).eval(), x2)
     aeq(get_output(l_slice_ax2, x).eval(), x3)
+
+    # test slicing None dimension
+    in_shp = (2, None, 2)
+    l_inp = InputLayer(in_shp)
+    l_slice_ax1 = SliceLayer(l_inp, axis=1, indices=slice(3, 5))
+    assert get_output_shape(l_slice_ax1) == (2, None, 2)
+    aeq(get_output(l_slice_ax1, x).eval(), x2)

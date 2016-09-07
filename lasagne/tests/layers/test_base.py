@@ -58,6 +58,19 @@ class TestLayer:
         assert layer.get_params(tag2=False) == [A]
         assert layer.get_params(tag1=True, tag2=True) == [B]
 
+    def test_get_params_expressions(self, layer):
+        x, y, z = (theano.shared(0, name=n) for n in 'xyz')
+        W1 = layer.add_param(x**2 + theano.tensor.log(y), (), tag1=True)
+        W2 = layer.add_param(theano.tensor.matrix(), (10, 10), tag1=True)
+        W3 = layer.add_param(z.T, (), tag2=True)
+        # layer.params stores the parameter expressions:
+        assert list(layer.params.keys()) == [W1, W2, W3]
+        # layer.get_params() returns the underlying shared variables:
+        assert layer.get_params() == [x, y, z]
+        # filtering acts on the parameter expressions:
+        assert layer.get_params(tag1=True) == [x, y]
+        assert layer.get_params(tag2=True) == [z]
+
     def test_add_param_tags(self, layer):
         a_shape = (20, 50)
         a = numpy.random.normal(0, 1, a_shape)
@@ -108,6 +121,16 @@ class TestLayer:
             Layer(zero_input_layer)
         Layer(pos_input_layer)
 
+    def test_symbolic_output_shape(self):
+        from lasagne.layers.base import Layer
+
+        class WrongLayer(Layer):
+            def get_output_shape_for(self, input_shape):
+                return theano.tensor.vector().shape
+        with pytest.raises(ValueError) as exc:
+            WrongLayer((None,)).output_shape
+        assert "symbolic output shape" in exc.value.args[0]
+
 
 class TestMergeLayer:
     @pytest.fixture
@@ -145,3 +168,13 @@ class TestMergeLayer:
     def test_get_output_for_notimplemented(self, layer):
         with pytest.raises(NotImplementedError):
             layer.get_output_for(Mock())
+
+    def test_symbolic_output_shape(self):
+        from lasagne.layers.base import MergeLayer
+
+        class WrongLayer(MergeLayer):
+            def get_output_shape_for(self, input_shapes):
+                return theano.tensor.vector().shape
+        with pytest.raises(ValueError) as exc:
+            WrongLayer([(None,)]).output_shape
+        assert "symbolic output shape" in exc.value.args[0]

@@ -5,7 +5,7 @@ from .. import nonlinearities
 
 from .base import Layer
 
-from .conv import conv_output_length
+from .conv import conv_output_length, BaseConvLayer
 from ..utils import as_tuple
 
 from theano.sandbox.cuda.basic_ops import gpu_contiguous
@@ -13,21 +13,17 @@ from theano.sandbox.cuda.blas import GpuCorrMM
 
 
 __all__ = [
-    "MMLayer",
     "Conv2DMMLayer",
 ]
 
 
-if not theano.config.device.startswith("gpu"):
-    raise ImportError("requires a GPU to work")  # pragma: no cover
+if not theano.sandbox.cuda.cuda_enabled:
+    raise ImportError(
+            "requires GPU support -- see http://lasagne.readthedocs.org/en/"
+            "latest/user/installation.html#gpu-support")  # pragma: no cover
 
 
-# base class for all layers that rely on GpuCorrMM directly
-class MMLayer(Layer):
-    pass
-
-
-class Conv2DMMLayer(MMLayer):
+class Conv2DMMLayer(BaseConvLayer):
     """
     lasagne.layers.Conv2DMMLayer(incoming, num_filters, filter_size,
     stride=(1, 1), pad=0, untie_biases=False,
@@ -73,9 +69,9 @@ class Conv2DMMLayer(MMLayer):
         is equivalent to computing the convolution wherever the input and the
         filter overlap by at least one position.
 
-        ``'same'`` pads with half the filter size on both sides (one less on
-        the second side for an even filter size). When ``stride=1``, this
-        results in an output size equal to the input size.
+        ``'same'`` pads with half the filter size (rounded down) on both sides.
+        When ``stride=1`` this results in an output size equal to the input
+        size. Even filter size is not supported.
 
         ``'valid'`` is an alias for ``0`` (no padding / a valid convolution).
 
@@ -91,18 +87,18 @@ class Conv2DMMLayer(MMLayer):
         position in each channel. As a result, the `b` attribute will be a
         3D tensor.
 
-    W : Theano shared variable, numpy array or callable
-        An initializer for the weights of the layer. This should initialize the
-        layer weights to a 4D array with shape
+    W : Theano shared variable, expression, numpy array or callable
+        Initial value, expression or initializer for the weights.
+        These should be a 4D tensor with shape
         ``(num_filters, num_input_channels, filter_rows, filter_columns)``.
         See :func:`lasagne.utils.create_param` for more information.
 
-    b : Theano shared variable, numpy array, callable or None
-        An initializer for the biases of the layer. If None is provided, the
-        layer will have no biases. This should initialize the layer biases to
+    b : Theano shared variable, expression, numpy array, callable or ``None``
+        Initial value, expression or initializer for the biases. If set to
+        ``None``, the layer will have no biases. Otherwise, biases should be
         a 1D array with shape ``(num_filters,)`` if `untied_biases` is set to
         ``False``. If it is set to ``True``, its shape should be
-        ``(num_filters, input_rows, input_columns)`` instead.
+        ``(num_filters, output_rows, output_columns)`` instead.
         See :func:`lasagne.utils.create_param` for more information.
 
     nonlinearity : callable or None
@@ -127,78 +123,20 @@ class Conv2DMMLayer(MMLayer):
 
     b : Theano shared variable
         Variable representing the biases.
-
-    Notes
-    -----
-    Unlike :class:`lasagne.layers.Conv2DLayer`, this layer properly supports
-    ``pad='same'``. It is not emulated. This should result in better
-    performance.
     """
     def __init__(self, incoming, num_filters, filter_size, stride=(1, 1),
                  pad=0, untie_biases=False, W=init.GlorotUniform(),
                  b=init.Constant(0.), nonlinearity=nonlinearities.rectify,
                  flip_filters=False, **kwargs):
-        super(Conv2DMMLayer, self).__init__(incoming, **kwargs)
-        if nonlinearity is None:
-            self.nonlinearity = nonlinearities.identity
-        else:
-            self.nonlinearity = nonlinearity
-
-        self.num_filters = num_filters
-        self.filter_size = as_tuple(filter_size, 2)
-        self.stride = as_tuple(stride, 2)
-        self.untie_biases = untie_biases
-        self.flip_filters = flip_filters
-
-        if pad == 'valid':
-            self.pad = (0, 0)
-        elif pad == 'full':
-            self.pad = (self.filter_size[0] - 1, self.filter_size[1] - 1)
-        elif pad == 'same':
-            # only works for odd filter size, but the even filter size case
-            # is probably not worth supporting.
-            self.pad = ((self.filter_size[0] - 1) // 2,
-                        (self.filter_size[1] - 1) // 2)
-        else:
-            self.pad = as_tuple(pad, 2, int)
-
-        self.W = self.add_param(W, self.get_W_shape(), name="W")
-        if b is None:
-            self.b = None
-        else:
-            if self.untie_biases:
-                biases_shape = (num_filters, self.output_shape[2],
-                                self.output_shape[3])
-            else:
-                biases_shape = (num_filters,)
-            self.b = self.add_param(b, biases_shape, name="b",
-                                    regularizable=False)
-
+        super(Conv2DMMLayer, self).__init__(incoming, num_filters, filter_size,
+                                            stride, pad, untie_biases, W, b,
+                                            nonlinearity, flip_filters, n=2,
+                                            **kwargs)
+        border_mode = 'half' if self.pad == 'same' else self.pad
         self.corr_mm_op = GpuCorrMM(subsample=self.stride,
-                                    border_mode=self.pad)
+                                    border_mode=border_mode)
 
-    def get_W_shape(self):
-        num_input_channels = self.input_shape[1]
-        return (self.num_filters, num_input_channels, self.filter_size[0],
-                self.filter_size[1])
-
-    def get_output_shape_for(self, input_shape):
-        batch_size = input_shape[0]
-        pad = self.pad if isinstance(self.pad, tuple) else (self.pad,) * 2
-
-        output_rows = conv_output_length(input_shape[2],
-                                         self.filter_size[0],
-                                         self.stride[0],
-                                         pad[0])
-
-        output_columns = conv_output_length(input_shape[3],
-                                            self.filter_size[1],
-                                            self.stride[1],
-                                            pad[1])
-
-        return (batch_size, self.num_filters, output_rows, output_columns)
-
-    def get_output_for(self, input, **kwargs):
+    def convolve(self, input, **kwargs):
         filters = self.W
         if self.flip_filters:
             filters = filters[:, :, ::-1, ::-1]  # flip top-down, left-right
@@ -206,12 +144,4 @@ class Conv2DMMLayer(MMLayer):
         contiguous_filters = gpu_contiguous(filters)
         contiguous_input = gpu_contiguous(input)
         conved = self.corr_mm_op(contiguous_input, contiguous_filters)
-
-        if self.b is None:
-            activation = conved
-        elif self.untie_biases:
-            activation = conved + self.b.dimshuffle('x', 0, 1, 2)
-        else:
-            activation = conved + self.b.dimshuffle('x', 0, 'x', 'x')
-
-        return self.nonlinearity(activation)
+        return conved

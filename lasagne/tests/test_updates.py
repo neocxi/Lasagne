@@ -32,6 +32,9 @@ class TestUpdateFunctions(object):
                     'adam': [0.90034972009036,
                              0.90034967993061,
                              0.90034966654402],
+                    'adamax': [0.90211749000754,
+                               0.90211748762402,
+                               0.90211748682951],
                     }
 
     def f(self, X):
@@ -45,6 +48,7 @@ class TestUpdateFunctions(object):
         ['rmsprop', {'learning_rate': 0.01}],
         ['adadelta', {}],
         ['adam', {'learning_rate': 0.01}],
+        ['adamax', {'learning_rate': 0.01}],
         ])
     def test_updates(self, method, kwargs):
         A = theano.shared(lasagne.utils.floatX([1, 1, 1]))
@@ -61,13 +65,61 @@ class TestUpdateFunctions(object):
         assert np.allclose(A.get_value(), B.get_value())
         assert np.allclose(A.get_value(), self.torch_values[method])
 
+    @pytest.mark.parametrize('method, kwargs', [
+        ['sgd', {'learning_rate': 0.1}],
+        ['momentum', {'learning_rate': 0.1,
+                      'momentum': 0.5}],
+        ['nesterov_momentum', {'learning_rate': 0.1,
+                               'momentum': 0.5}],
+        ['adagrad', {'learning_rate': 0.1,
+                     'epsilon': 1e-6}],
+        ['rmsprop', {'learning_rate': 0.01,
+                     'rho': 0.9,
+                     'epsilon': 1e-6}],
+        ['adadelta', {'learning_rate': 0.01,
+                      'rho': 0.9,
+                      'epsilon': 1e-6}],
+        ['adam', {'learning_rate': 0.01,
+                  'beta1': 0.9,
+                  'beta2': 0.999,
+                  'epsilon': 1e-8}],
+        ['adamax', {'learning_rate': 0.01,
+                    'beta1': 0.9,
+                    'beta2': 0.999,
+                    'epsilon': 1e-8}],
+        ])
+    def test_update_returntype(self, method, kwargs):
+        '''Checks whether lasagne.updates handles float32 inputs correctly'''
+        floatX_ = theano.config.floatX
+        theano.config.floatX = 'float32'
+        try:
+            A = theano.shared(lasagne.utils.floatX([1, 1, 1]))
+            B = theano.shared(lasagne.utils.floatX([1, 1, 1]))
+            update_func = getattr(lasagne.updates, method)
+            updates = update_func(self.f(A) + self.f(B),
+                                  [A, B],
+                                  **kwargs)
 
-def test_get_or_compute_grads_raises():
+            assert all(v.dtype == 'float32' for v in updates)
+
+            # Checking for float32 arguments
+            for param in kwargs:
+                kwargs[param] = np.float32(kwargs[param])
+            updates = update_func(self.f(A) + self.f(B),
+                                  [A, B],
+                                  **kwargs)
+
+            assert all(v.dtype == 'float32' for v in updates)
+        finally:
+            theano.config.floatX = floatX_
+
+
+def test_get_or_compute_grads():
 
     from lasagne.updates import get_or_compute_grads
 
-    A = T.scalar()
-    B = T.scalar()
+    A = theano.shared(1)
+    B = theano.shared(1)
     loss = A + B
     grads = get_or_compute_grads(loss, [A, B])
 
@@ -75,6 +127,10 @@ def test_get_or_compute_grads_raises():
 
     with pytest.raises(ValueError):
         get_or_compute_grads(grads, [A])
+
+    C = T.scalar()
+    with pytest.raises(ValueError):
+        get_or_compute_grads(A + C, [A, C])
 
 
 @pytest.mark.parametrize('ndim', [2, 3])

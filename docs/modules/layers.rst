@@ -16,6 +16,7 @@
     layers/noise
     layers/shape
     layers/merge
+    layers/normalization
     layers/embedding
     layers/special
     layers/corrmm
@@ -70,6 +71,9 @@
 
     Conv1DLayer
     Conv2DLayer
+    TransposedConv2DLayer
+    Deconv2DLayer
+    DilatedConv2DLayer
 
 
 .. rubric:: :doc:`layers/pool`
@@ -79,7 +83,9 @@
 
     MaxPool1DLayer
     MaxPool2DLayer
+    Pool1DLayer
     Pool2DLayer
+    Upscale1DLayer
     Upscale2DLayer
     GlobalPoolLayer
     FeaturePoolLayer
@@ -135,6 +141,16 @@
     ElemwiseSumLayer
 
 
+.. rubric:: :doc:`layers/normalization`
+
+.. autosummary::
+    :nosignatures:
+
+    LocalResponseNormalization2DLayer
+    BatchNormLayer
+    batch_norm
+
+
 .. rubric:: :doc:`layers/embedding`
 
 .. autosummary::
@@ -150,8 +166,13 @@
 
     NonlinearityLayer
     BiasLayer
+    ExpressionLayer
     InverseLayer
     TransformerLayer
+    ParametricRectifierLayer
+    prelu
+    RandomizedRectifierLayer
+    rrelu
 
 
 .. rubric:: :doc:`layers/corrmm`
@@ -182,6 +203,10 @@
     :nosignatures:
 
     dnn.Conv2DDNNLayer
+    dnn.Conv3DDNNLayer
     dnn.MaxPool2DDNNLayer
     dnn.Pool2DDNNLayer
+    dnn.MaxPool3DDNNLayer
+    dnn.Pool3DDNNLayer
+    dnn.SpatialPyramidPoolingDNNLayer
 
